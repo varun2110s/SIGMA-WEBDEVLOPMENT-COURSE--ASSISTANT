@@ -7,14 +7,14 @@ import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ---- Config (env vars, no hardcoded secrets) ----
+# ---- Config ----
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-OLLAMA_EMBED_URL = os.getenv("OLLAMA_EMBED_URL", "http://host.docker.internal:11434/api/embed")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
-EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings.joblib")
+EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings_hf.joblib")
+SIMILARITY_THRESHOLD = 0.3
 
 app = FastAPI(title="Sigma RAG API")
 
@@ -25,7 +25,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load embeddings once at startup, not per-request
+print("Loading embedding model (bge-m3)... this happens once at startup.")
+embed_model = SentenceTransformer("BAAI/bge-m3")
+
+print("Loading precomputed course embeddings...")
 df = joblib.load(EMBEDDINGS_PATH)
 
 
@@ -33,13 +36,8 @@ class Query(BaseModel):
     question: str
 
 
-def create_embedding(text_list):
-    r = requests.post(OLLAMA_EMBED_URL, json={
-        "model": OLLAMA_EMBED_MODEL,
-        "input": text_list
-    }, timeout=30)
-    r.raise_for_status()
-    return r.json()["embeddings"]
+def create_embedding(text):
+    return embed_model.encode([text])[0]
 
 
 def inference_llm(prompt, max_retries=3):
@@ -118,13 +116,10 @@ def health():
     return {"status": "ok"}
 
 
-SIMILARITY_THRESHOLD = 0.3  # tune this based on testing with your embedding model
-
-
 @app.post("/ask")
 def ask(query: Query):
     try:
-        question_embedding = create_embedding([query.question])[0]
+        question_embedding = create_embedding(query.question)
 
         similarities = cosine_similarity(
             np.vstack(df['embedding'].values), [question_embedding]
@@ -134,7 +129,6 @@ def ask(query: Query):
         max_indx = similarities.argsort()[::-1][0:top_results]
         top_similarities = similarities[max_indx]
 
-        # If even the best match is weak, skip the LLM call entirely
         if top_similarities.max() < SIMILARITY_THRESHOLD:
             return {"answer": "I can only answer questions related to the Sigma Web Development course. Please ask something about the course content."}
 
@@ -142,7 +136,7 @@ def ask(query: Query):
         new_df["start_mmss"] = new_df["start"].apply(format_timestamp)
         new_df["end_mmss"] = new_df["end"].apply(format_timestamp)
 
-        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , start time , end time (both given in minutes:seconds format) and the text at that time :
+        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , start time , end time (both given in readable time format) and the text at that time :
 
 {new_df[["title", "number", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
 ------------------------------
