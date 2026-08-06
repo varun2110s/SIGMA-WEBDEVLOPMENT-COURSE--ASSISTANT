@@ -1,10 +1,11 @@
 import os
 import re
 import time
+from collections import defaultdict
 import joblib
 import numpy as np
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
@@ -34,6 +35,19 @@ df = joblib.load(EMBEDDINGS_PATH)
 
 class Query(BaseModel):
     question: str
+
+
+RATE_LIMIT_MAX_REQUESTS = 15
+RATE_LIMIT_WINDOW_SECONDS = 60
+request_log = defaultdict(list)
+
+
+def check_rate_limit(client_ip: str):
+    now = time.time()
+    request_log[client_ip] = [t for t in request_log[client_ip] if now - t < RATE_LIMIT_WINDOW_SECONDS]
+    if len(request_log[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests. Please slow down and try again shortly.")
+    request_log[client_ip].append(now)
 
 
 def create_embedding(text):
@@ -117,7 +131,10 @@ def health():
 
 
 @app.post("/ask")
-def ask(query: Query):
+def ask(query: Query, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip)
+
     try:
         question_embedding = create_embedding(query.question)
 
@@ -150,5 +167,8 @@ User asked this question related to the video chunks. Answer in a clear, human, 
         response = clean_text(response)
         return {"answer": response}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[ERROR] /ask failed: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong processing your question. Please try again.")
