@@ -2,6 +2,8 @@ import os
 import re
 import time
 from collections import defaultdict
+import torch
+torch.set_num_threads(2)  # avoid thread contention on shared/limited CPU
 import joblib
 import numpy as np
 import requests
@@ -37,7 +39,6 @@ class Query(BaseModel):
     question: str
 
 
-RATE_LIMIT_MAX_REQUESTS = 15
 RATE_LIMIT_WINDOW_SECONDS = 60
 request_log = defaultdict(list)
 
@@ -142,7 +143,7 @@ def ask(query: Query, request: Request):
             np.vstack(df['embedding'].values), [question_embedding]
         ).flatten()
 
-        top_results = 8
+        top_results = 6
         max_indx = similarities.argsort()[::-1][0:top_results]
         top_similarities = similarities[max_indx]
 
@@ -152,14 +153,28 @@ def ask(query: Query, request: Request):
         new_df = df.iloc[max_indx].copy()
         new_df["start_mmss"] = new_df["start"].apply(format_timestamp)
         new_df["end_mmss"] = new_df["end"].apply(format_timestamp)
+        # Construct a direct YouTube link for each chunk using the playlist + video number
+        new_df["youtube_url"] = new_df["number"].apply(
+            lambda n: f"https://www.youtube.com/watch?list=PLu0W_9lII9agq5TrH9XLIKQvv0iaF2X3w&index={n}"
+        )
 
-        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , start time , end time (both given in readable time format) and the text at that time :
+        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , youtube url , start time , end time (both given in readable time format) and the text at that time :
 
-{new_df[["title", "number", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
+{new_df[["title", "number", "youtube_url", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
 ------------------------------
 
 "{query.question}"
-User asked this question related to the video chunks. Answer in a clear, human, conversational way (dont mention the above format, its just for you). Focus ONLY on the chunk(s) that are most directly relevant to the question - ignore chunks that only loosely or partially relate. Do not mix in unrelated details from other chunks just because they were retrieved. Keep the answer concise and to the point: name the video and the exact timestamp(s), and briefly describe what is taught there. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format. If none of the chunks are actually relevant to the question, tell the user you can only answer questions related to the course.
+User asked this question related to the video chunks. Include EVERY chunk that is genuinely relevant to the question - if multiple different videos cover the topic, mention all of them, not just one.
+
+For EACH relevant video, format it EXACTLY like this (in plain text, not markdown):
+
+Video No: <number>
+Title: <title>
+Timestamp: <start_mmss> to <end_mmss>
+Watch here: <youtube_url>
+You can watch the full video by clicking the link above and learn about <short topic description>.
+
+Leave a blank line between each video block. Do not skip the "Video No:" line for any video you mention - it must always be present. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format. If none of the chunks are actually relevant to the question, just say you can only answer questions related to the course - do not use the format above in that case.
 
 '''
 
@@ -170,5 +185,7 @@ User asked this question related to the video chunks. Answer in a clear, human, 
     except HTTPException:
         raise
     except Exception as e:
+        # Log full details server-side for debugging, but never leak
+        # internals (stack traces, file paths) to the client.
         print(f"[ERROR] /ask failed: {e}")
         raise HTTPException(status_code=500, detail="Something went wrong processing your question. Please try again.")
