@@ -39,6 +39,10 @@ class Query(BaseModel):
     question: str
 
 
+# ---- Simple rate limiting (per IP) to prevent abuse of the Groq API quota ----
+# Note: this is in-memory, so it resets on restart and won't work across
+# multiple server instances - fine for a single-instance free-tier deploy.
+RATE_LIMIT_MAX_REQUESTS = 15
 RATE_LIMIT_WINDOW_SECONDS = 60
 request_log = defaultdict(list)
 
