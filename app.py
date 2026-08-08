@@ -9,6 +9,7 @@ import numpy as np
 import requests
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -133,6 +134,21 @@ def format_timestamp(seconds):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/")
+def serve_frontend():
+    return FileResponse("frontend.html")
+
+
+@app.get("/script.js")
+def serve_script():
+    return FileResponse("script.js", media_type="application/javascript")
+
+
+@app.get("/style.css")
+def serve_style():
+    return FileResponse("style.css", media_type="text/css")
 
 
 @app.post("/ask")
