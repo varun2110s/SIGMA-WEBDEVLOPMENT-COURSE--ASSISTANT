@@ -14,7 +14,7 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 OLLAMA_EMBED_URL = os.getenv("OLLAMA_EMBED_URL", "http://host.docker.internal:11434/api/embed")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
-EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings.joblib")
+EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings_hf.joblib")
 
 app = FastAPI(title="Sigma RAG API")
 
