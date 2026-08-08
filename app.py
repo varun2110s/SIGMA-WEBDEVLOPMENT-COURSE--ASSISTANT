@@ -38,6 +38,10 @@ df = joblib.load(EMBEDDINGS_PATH)
 class Query(BaseModel):
     question: str
 
+
+# ---- Simple rate limiting (per IP) to prevent abuse of the Groq API quota ----
+# Note: this is in-memory, so it resets on restart and won't work across
+# multiple server instances - fine for a single-instance free-tier deploy.
 RATE_LIMIT_MAX_REQUESTS = 15
 RATE_LIMIT_WINDOW_SECONDS = 60
 request_log = defaultdict(list)
@@ -67,7 +71,7 @@ def inference_llm(prompt, max_retries=3):
                 json={
                     "model": GROQ_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.7
+                    "temperature": 0.2
                 },
                 timeout=30
             )
@@ -153,30 +157,33 @@ def ask(query: Query, request: Request):
         new_df = df.iloc[max_indx].copy()
         new_df["start_mmss"] = new_df["start"].apply(format_timestamp)
         new_df["end_mmss"] = new_df["end"].apply(format_timestamp)
-        # Construct a direct YouTube link for each chunk using the playlist + video number
-        new_df["youtube_url"] = new_df["number"].apply(
-            lambda n: f"https://www.youtube.com/watch?list=PLu0W_9lII9agq5TrH9XLIKQvv0iaF2X3w&index={n}"
-        )
 
-        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , youtube url , start time , end time (both given in readable time format) and the text at that time :
+        PLAYLIST_URL = "https://www.youtube.com/playlist?list=PLu0W_9lII9agq5TrH9XLIKQvv0iaF2X3w"
 
-{new_df[["title", "number", "youtube_url", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
+        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , start time , end time (both given in readable time format) and the text at that time :
+
+{new_df[["title", "number", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
 ------------------------------
 
 "{query.question}"
 User asked this question related to the video chunks. Include EVERY chunk that is genuinely relevant to the question - if multiple different videos cover the topic, mention all of them, not just one.
 
-IMPORTANT: If the SAME video number appears multiple times (multiple relevant timestamps within the same video), combine them into ONE block for that video, and include the link only ONCE at the end of that block. Do not repeat the same video's block or link multiple times. However, do NOT merge the timestamps into one vague combined description - for EACH timestamp range within that video, describe specifically and separately what is taught in THAT exact range, using its own chunk text. Never write one generic summary that mixes multiple timestamp ranges together.
+IMPORTANT: If the SAME video number appears multiple times (multiple relevant timestamps within the same video), combine them into ONE block for that video - list all the timestamps together instead of repeating the video block.
 
 For EACH unique relevant video, format it EXACTLY like this (in plain text, not markdown):
 
 Video No: <number>
 Title: <title>
-Timestamp: <start_mmss> to <end_mmss> - <specific description of what is taught in exactly this range>
-(repeat the "Timestamp: ... - ..." line separately for each additional relevant timestamp range in this same video, each with its own specific description)
-Watch here: <youtube_url>
+Timestamp: <start_mmss> to <end_mmss> (if there are multiple relevant timestamps in this same video, list them all here separated by commas, e.g. "18 min 55 sec to 19 min 57 sec, 23 min 13 sec to 24 min 17 sec")
+Topic: <a clear, specific description of exactly what is taught at this timestamp - name the actual concept, not a vague summary (e.g. "CSS Flexbox alignment properties", "creating HTML forms with input tags", "JavaScript array map and filter methods")>
 
-Leave a blank line between each video block. Do not skip the "Video No:" line for any video you mention - it must always be present. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format. If none of the chunks are actually relevant to the question, just say you can only answer questions related to the course - do not use the format above in that case.
+Leave a blank line between each video block. The "Video No:", "Title:", "Timestamp:", and "Topic:" lines must ALL be present for every video block - never skip the Topic line. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format.
+
+After ALL the video blocks, add exactly this closing line on its own (fill in the URL exactly as given, do not modify it):
+
+{PLAYLIST_URL}
+
+If none of the chunks are actually relevant to the question, just say you can only answer questions related to the course - do not use the format above in that case, and do not include the playlist line either.
 
 '''
 
