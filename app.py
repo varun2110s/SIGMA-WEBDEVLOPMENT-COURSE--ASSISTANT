@@ -174,10 +174,10 @@ For EACH unique relevant video, format it EXACTLY like this (in plain text, not 
 
 Video No: <number>
 Title: <title>
-Timestamp: <start_mmss> to <end_mmss> (if there are multiple relevant timestamps in this same video, list them all here separated by commas, e.g. "18 min 55 sec to 19 min 57 sec, 23 min 13 sec to 24 min 17 sec")
-Topic: <a clear, specific description of exactly what is taught at this timestamp - name the actual concept, not a vague summary (e.g. "CSS Flexbox alignment properties", "creating HTML forms with input tags", "JavaScript array map and filter methods")>
+Timestamp: <start_mmss> to <end_mmss> - <specific description of exactly what is taught in THIS exact range - name the actual concept, not a vague summary>
+(if there are multiple relevant timestamp ranges in this same video, repeat the "Timestamp: ... - ..." line separately for each one, each with its own specific description based on that range's own text - do NOT merge multiple ranges into one combined description)
 
-Leave a blank line between each video block. The "Video No:", "Title:", "Timestamp:", and "Topic:" lines must ALL be present for every video block - never skip the Topic line. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format.
+Leave a blank line between each video block. The "Video No:", "Title:", and "Timestamp:" lines must ALL be present for every video block. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format.
 
 After ALL the video blocks, add exactly this closing line on its own (fill in the URL exactly as given, do not modify it):
 
