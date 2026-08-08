@@ -8,12 +8,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 # ---- Config (env vars, no hardcoded secrets) ----
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-OLLAMA_EMBED_URL = os.getenv("OLLAMA_EMBED_URL", "http://host.docker.internal:11434/api/embed")
-OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
+EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
 EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings_hf.joblib")
 
 app = FastAPI(title="Sigma RAG API")
@@ -28,18 +28,18 @@ app.add_middleware(
 # Load embeddings once at startup, not per-request
 df = joblib.load(EMBEDDINGS_PATH)
 
+# Load the embedding model once at startup (runs inside this container,
+# no external Ollama server needed - this is what was failing on Railway
+# since host.docker.internal only resolves on your local machine).
+embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+
 
 class Query(BaseModel):
     question: str
 
 
 def create_embedding(text_list):
-    r = requests.post(OLLAMA_EMBED_URL, json={
-        "model": OLLAMA_EMBED_MODEL,
-        "input": text_list
-    }, timeout=30)
-    r.raise_for_status()
-    return r.json()["embeddings"]
+    return embed_model.encode(text_list, normalize_embeddings=True).tolist()
 
 
 def inference_llm(prompt, max_retries=3):
