@@ -1,20 +1,23 @@
 import os
 import re
 import time
+from collections import defaultdict
+import torch
+torch.set_num_threads(2)  # avoid thread contention on shared/limited CPU
 import joblib
 import numpy as np
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from sklearn.metrics.pairwise import cosine_similarity
 from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# ---- Config (env vars, no hardcoded secrets) ----
+# ---- Config ----
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-EMBED_MODEL_NAME = os.getenv("EMBED_MODEL_NAME", "BAAI/bge-m3")
 EMBEDDINGS_PATH = os.getenv("EMBEDDINGS_PATH", "embeddings_hf.joblib")
+SIMILARITY_THRESHOLD = 0.3
 
 app = FastAPI(title="Sigma RAG API")
 
@@ -25,21 +28,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load embeddings once at startup, not per-request
-df = joblib.load(EMBEDDINGS_PATH)
+print("Loading embedding model (bge-m3)... this happens once at startup.")
+embed_model = SentenceTransformer("BAAI/bge-m3")
 
-# Load the embedding model once at startup (runs inside this container,
-# no external Ollama server needed - this is what was failing on Railway
-# since host.docker.internal only resolves on your local machine).
-embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+print("Loading precomputed course embeddings...")
+df = joblib.load(EMBEDDINGS_PATH)
 
 
 class Query(BaseModel):
     question: str
 
+RATE_LIMIT_MAX_REQUESTS = 15
+RATE_LIMIT_WINDOW_SECONDS = 60
+request_log = defaultdict(list)
 
-def create_embedding(text_list):
-    return embed_model.encode(text_list, normalize_embeddings=True).tolist()
+
+def check_rate_limit(client_ip: str):
+    now = time.time()
+    request_log[client_ip] = [t for t in request_log[client_ip] if now - t < RATE_LIMIT_WINDOW_SECONDS]
+    if len(request_log[client_ip]) >= RATE_LIMIT_MAX_REQUESTS:
+        raise HTTPException(status_code=429, detail="Too many requests. Please slow down and try again shortly.")
+    request_log[client_ip].append(now)
+
+
+def create_embedding(text):
+    return embed_model.encode([text])[0]
 
 
 def inference_llm(prompt, max_retries=3):
@@ -118,73 +131,63 @@ def health():
     return {"status": "ok"}
 
 
-SIMILARITY_THRESHOLD = 0.3  # tune this based on testing with your embedding model
-
-
 @app.post("/ask")
-def ask(query: Query):
+def ask(query: Query, request: Request):
+    client_ip = request.client.host if request.client else "unknown"
+    check_rate_limit(client_ip)
+
     try:
-        question_embedding = create_embedding([query.question])[0]
+        question_embedding = create_embedding(query.question)
 
         similarities = cosine_similarity(
             np.vstack(df['embedding'].values), [question_embedding]
         ).flatten()
 
-        top_results = 8
+        top_results = 6
         max_indx = similarities.argsort()[::-1][0:top_results]
         top_similarities = similarities[max_indx]
 
-        # If even the best match is weak, skip the LLM call entirely
         if top_similarities.max() < SIMILARITY_THRESHOLD:
             return {"answer": "I can only answer questions related to the Sigma Web Development course. Please ask something about the course content."}
 
         new_df = df.iloc[max_indx].copy()
         new_df["start_mmss"] = new_df["start"].apply(format_timestamp)
         new_df["end_mmss"] = new_df["end"].apply(format_timestamp)
+        # Construct a direct YouTube link for each chunk using the playlist + video number
+        new_df["youtube_url"] = new_df["number"].apply(
+            lambda n: f"https://www.youtube.com/watch?list=PLu0W_9lII9agq5TrH9XLIKQvv0iaF2X3w&index={n}"
+        )
 
-        # NOTE: change "url" below if your df's video-URL column has a different name
-        # (e.g. "link" or "youtube_url").
-        URL_COLUMN = "url"
+        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , youtube url , start time , end time (both given in readable time format) and the text at that time :
 
-        prompt = f'''  I am teaching web devlopment using sigma web devlopment course, here are video chunks containing video title , video number , start time , end time (both given in minutes:seconds format) and the text at that time :
-
-{new_df[["title", "number", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
+{new_df[["title", "number", "youtube_url", "text", "start_mmss", "end_mmss"]].to_json(orient="records")}
 ------------------------------
 
 "{query.question}"
-User asked this question related to the video chunks above. Write a clear, human, conversational answer as flowing plain paragraphs (dont mention the above format, its just for you, and dont use markdown tables, headers, or labels like "Video No:" or "Timestamp:").
+User asked this question related to the video chunks. Include EVERY chunk that is genuinely relevant to the question - if multiple different videos cover the topic, mention all of them, not just one.
 
-Focus ONLY on the chunk(s) that are genuinely relevant to the question - ignore chunks that only loosely or partially relate.
+IMPORTANT: If the SAME video number appears multiple times (multiple relevant timestamps within the same video), combine them into ONE block for that video - list all the timestamps together, and include the link only ONCE at the end of that block. Do not repeat the same video's block or link multiple times.
 
-If a video has multiple relevant timestamp ranges, do NOT merge them into one vague combined description. Instead, describe each timestamp range separately and specifically - say what is actually taught in THAT exact range, using its own chunk text, not a generic summary that mixes ranges together.
+For EACH unique relevant video, format it EXACTLY like this (in plain text, not markdown):
 
-Always name the video (its number and title) and mention its timestamp(s) exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format.
+Video No: <number>
+Title: <title>
+Timestamp: <start_mmss> to <end_mmss> (if there are multiple relevant timestamps in this same video, list them all here separated by commas, e.g. "18 min 55 sec to 19 min 57 sec, 23 min 13 sec to 24 min 17 sec")
+Watch here: <youtube_url>
+You can watch the full video by clicking the link above and learn about <short topic description covering everything relevant found across all the timestamps for this video>.
 
-Do NOT include any links or URLs anywhere in your answer - just the explanation text. Links will be added separately.
+Leave a blank line between each video block. Do not skip the "Video No:" line for any video you mention - it must always be present. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format. If none of the chunks are actually relevant to the question, just say you can only answer questions related to the course - do not use the format above in that case.
 
-If none of the chunks are actually relevant to the question, simply tell the user you can only answer questions related to the course.
 '''
 
         response = inference_llm(prompt)
         response = clean_text(response)
-
-        # Attach real video URLs ourselves (never LLM-generated -> no hallucination risk).
-        # Only for the unique videos that were actually relevant (above threshold).
-        relevant = new_df[top_similarities >= SIMILARITY_THRESHOLD]
-        if URL_COLUMN in relevant.columns:
-            unique_videos = relevant.drop_duplicates(subset=["number"]).sort_values("number")
-            links = []
-            for _, row in unique_videos.iterrows():
-                if row.get(URL_COLUMN):
-                    links.append((row["title"], row[URL_COLUMN]))
-
-            if len(links) == 1:
-                response = f"{response}\n\nYou can watch it here: {links[0][1]}"
-            elif len(links) > 1:
-                link_lines = "\n".join(f"{title}: {url}" for title, url in links)
-                response = f"{response}\n\nYou can watch these here:\n{link_lines}"
-
         return {"answer": response}
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log full details server-side for debugging, but never leak
+        # internals (stack traces, file paths) to the client.
+        print(f"[ERROR] /ask failed: {e}")
+        raise HTTPException(status_code=500, detail="Something went wrong processing your question. Please try again.")
