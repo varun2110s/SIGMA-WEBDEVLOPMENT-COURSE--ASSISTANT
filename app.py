@@ -38,10 +38,6 @@ df = joblib.load(EMBEDDINGS_PATH)
 class Query(BaseModel):
     question: str
 
-
-# ---- Simple rate limiting (per IP) to prevent abuse of the Groq API quota ----
-# Note: this is in-memory, so it resets on restart and won't work across
-# multiple server instances - fine for a single-instance free-tier deploy.
 RATE_LIMIT_MAX_REQUESTS = 15
 RATE_LIMIT_WINDOW_SECONDS = 60
 request_log = defaultdict(list)
@@ -170,13 +166,15 @@ def ask(query: Query, request: Request):
 "{query.question}"
 User asked this question related to the video chunks. Include EVERY chunk that is genuinely relevant to the question - if multiple different videos cover the topic, mention all of them, not just one.
 
-For EACH relevant video, format it EXACTLY like this (in plain text, not markdown):
+IMPORTANT: If the SAME video number appears multiple times (multiple relevant timestamps within the same video), combine them into ONE block for that video - list all the timestamps together, and include the link only ONCE at the end of that block. Do not repeat the same video's block or link multiple times.
+
+For EACH unique relevant video, format it EXACTLY like this (in plain text, not markdown):
 
 Video No: <number>
 Title: <title>
-Timestamp: <start_mmss> to <end_mmss>
+Timestamp: <start_mmss> to <end_mmss> (if there are multiple relevant timestamps in this same video, list them all here separated by commas, e.g. "18 min 55 sec to 19 min 57 sec, 23 min 13 sec to 24 min 17 sec")
 Watch here: <youtube_url>
-You can watch the full video by clicking the link above and learn about <short topic description>.
+You can watch the full video by clicking the link above and learn about <short topic description covering everything relevant found across all the timestamps for this video>.
 
 Leave a blank line between each video block. Do not skip the "Video No:" line for any video you mention - it must always be present. Do not mix in unrelated details from chunks that only loosely or partially relate. Always mention timestamps exactly as given (e.g. "6 min 28 sec"), never convert to raw seconds or any other format. If none of the chunks are actually relevant to the question, just say you can only answer questions related to the course - do not use the format above in that case.
 
